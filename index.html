@@ -7,7 +7,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Склад">
 <title>Склад — где лежит товар</title>
-<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 :root{--bg:#f1f5f9;--card:#fff;--line:#e2e8f0;--txt:#0f172a;--dim:#64748b;--acc:#2563eb}
@@ -38,7 +38,8 @@ input:focus{border-color:#93c5fd;background:#fff}
 .badge{display:inline-block;font-size:11.5px;font-weight:600;padding:4px 9px;border-radius:999px;background:#f1f5f9;color:var(--dim)}
 .badge.on{background:#ecfdf5;color:#047857}.badge.warn{background:#fffbeb;color:#b45309}
 .rw{margin-bottom:12px;border-radius:16px;overflow:hidden;background:#0f172a;position:relative}
-#reader{width:100%;min-height:240px}
+#vid{width:100%;display:block;background:#000;min-height:200px}
+.frame{position:absolute;left:4%;right:4%;top:25%;bottom:25%;border:2px solid #22c55e;border-radius:12px;pointer-events:none;box-shadow:0 0 0 999px rgba(0,0,0,.28)}
 .torch{position:absolute;right:10px;bottom:10px;width:48px;height:48px;border-radius:14px;border:0;background:rgba(255,255,255,.2);color:#fff;font-size:22px;z-index:5}
 .torch.on{background:#fbbf24}
 .hidden{display:none!important}
@@ -81,9 +82,10 @@ input:focus{border-color:#93c5fd;background:#fff}
       <div style="min-width:0"><div class="cap">Последний штрихкод</div><div class="big" id="lastScan">—</div></div>
       <div style="text-align:right"><span class="badge" id="netBadge">—</span></div>
     </div>
-    <div class="rw hidden" id="rw"><div id="reader"></div><button class="torch hidden" id="btnTorch">🔦</button></div>
+    <div class="rw hidden" id="rw"><video id="vid" playsinline muted></video><div class="frame"></div><button class="torch hidden" id="btnTorch">🔦</button></div>
     <button class="btn primary block scan" id="btnScan">📷 Включить сканер</button>
     <div class="row"><input id="manual" inputmode="numeric" autocomplete="off" placeholder="Штрихкод вручную"><button class="btn primary" id="btnSend">Добавить</button></div>
+    <div class="hint" id="scanInfo"></div>
     <div class="hint" id="queueHint"></div>
     <div class="stats" id="scanStats"></div>
   </section>
@@ -144,7 +146,8 @@ const st = {
   s: localStorage.getItem(K.s) || '', api: localStorage.getItem(K.api) || '',
   db: load(K.db, []), scanning: false, mode: 'add', busy: false
 };
-let scanner = null, torchOn = false, lastCode = {code:'', at:0};
+let stream = null, torchOn = false, lastCode = {code:'', at:0}, loopT = null, det = null, zr = null, zhints = null, paused = false, frames = 0;
+const cv = document.createElement('canvas'), cx = cv.getContext('2d', {willReadFrequently:true});
 
 function save(){
   try {
@@ -266,33 +269,59 @@ function openPod(section){
 async function startScanner(mode){
   if (st.scanning) return;
   st.mode = mode || 'add';
-  if (!window.isSecureContext){ toast('Камера работает только по HTTPS', 'err', 4000); return; }
-  if (typeof Html5Qrcode === 'undefined'){ toast('Библиотека сканера не загрузилась (нет интернета?)', 'err', 3500); return; }
+  if (!window.isSecureContext || !navigator.mediaDevices){ toast('Камера работает только по HTTPS', 'err', 4000); return; }
   if (st.mode === 'add' && !st.s){ openPodModal('Какой поддон?'); return; }
   switchTab('scan');
   $('rw').classList.remove('hidden'); $('btnTorch').classList.remove('hidden');
-  const F = window.Html5QrcodeSupportedFormats || {};
-  const formats = [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39, F.CODE_93, F.ITF, F.CODABAR, F.QR_CODE, F.DATA_MATRIX].filter(v => v !== undefined);
-  scanner = new Html5Qrcode('reader', {verbose:false, formatsToSupport: formats.length ? formats : undefined, experimentalFeatures:{useBarCodeDetectorIfSupported:true}});
   try {
-    const base = {fps:20, qrbox:(w, h) => ({width:Math.floor(w * 0.9), height:Math.floor(Math.min(h, w * 0.5))}), disableFlip:true};
-    try {
-      await scanner.start({facingMode:'environment'},
-        Object.assign({}, base, {videoConstraints:{facingMode:'environment', width:{ideal:1920}, height:{ideal:1080}}}), onScan, () => {});
-    } catch(e1){
-      await scanner.start({facingMode:'environment'}, base, onScan, () => {});
-    }
-    st.scanning = true;
-    $('btnScan').textContent = '⏹ Остановить сканер'; $('btnScan').classList.add('stop');
+    stream = await navigator.mediaDevices.getUserMedia({audio:false, video:{facingMode:{ideal:'environment'}, width:{ideal:1920}, height:{ideal:1080}}});
   } catch(e){
-    scanner = null; st.scanning = false; $('rw').classList.add('hidden');
-    toast('Не удалось включить камеру: проверь доступ в настройках браузера', 'err', 4000);
+    $('rw').classList.add('hidden'); $('btnTorch').classList.add('hidden');
+    toast('Не удалось включить камеру: проверь доступ в настройках браузера', 'err', 4000); return;
   }
+  const vid = $('vid');
+  try { await stream.getVideoTracks()[0].applyConstraints({advanced:[{focusMode:'continuous'}]}); } catch(e){}
+  vid.srcObject = stream; vid.muted = true; vid.setAttribute('playsinline', '');
+  try { await vid.play(); } catch(e){}
+  det = null; zr = null;
+  if ('BarcodeDetector' in window){ try { det = new BarcodeDetector(); } catch(e){ det = null; } }
+  if (!det && window.ZXing){
+    const Z = ZXing;
+    zhints = new Map();
+    zhints.set(Z.DecodeHintType.POSSIBLE_FORMATS, [Z.BarcodeFormat.EAN_13, Z.BarcodeFormat.EAN_8, Z.BarcodeFormat.UPC_A, Z.BarcodeFormat.UPC_E,
+      Z.BarcodeFormat.CODE_128, Z.BarcodeFormat.CODE_39, Z.BarcodeFormat.CODE_93, Z.BarcodeFormat.ITF, Z.BarcodeFormat.CODABAR, Z.BarcodeFormat.QR_CODE, Z.BarcodeFormat.DATA_MATRIX]);
+    zhints.set(Z.DecodeHintType.TRY_HARDER, true);
+    zr = new Z.MultiFormatReader();
+  }
+  if (!det && !zr){ toast('Модуль распознавания не загрузился (нет интернета?)', 'err', 4000); await stopScanner(); return; }
+  st.scanning = true; paused = false; frames = 0;
+  $('btnScan').textContent = '⏹ Остановить сканер'; $('btnScan').classList.add('stop');
+  loop();
+}
+async function loop(){
+  if (!st.scanning) return;
+  const vid = $('vid'), w = vid.videoWidth, h = vid.videoHeight;
+  if (w && !paused){
+    frames++;
+    let text = '';
+    try {
+      if (det){ const r = await det.detect(vid); if (r.length) text = r[0].rawValue; }
+      else {
+        const ch = Math.round(h * 0.5), cy = Math.round((h - ch) / 2);
+        cv.width = w; cv.height = ch;
+        cx.drawImage(vid, 0, cy, w, ch, 0, 0, w, ch);
+        try { text = zr.decode(new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(new ZXing.HTMLCanvasElementLuminanceSource(cv))), zhints).getText(); } catch(e){}
+      }
+    } catch(e){}
+    $('scanInfo').textContent = 'Ищу штрихкод… ' + (det ? 'детектор' : 'ZXing') + ', ' + w + '×' + h + ', кадров: ' + frames + '. Держи код в зелёной рамке, 15–25 см.';
+    if (text) await onScan(text);
+  }
+  loopT = setTimeout(loop, 120);
 }
 async function stopScanner(){
-  try { if (scanner) await scanner.stop(); } catch(e){}
-  try { if (scanner) scanner.clear(); } catch(e){}
-  scanner = null; st.scanning = false; torchOn = false;
+  clearTimeout(loopT); st.scanning = false; torchOn = false;
+  if (stream){ stream.getTracks().forEach(t => t.stop()); stream = null; }
+  $('vid').srcObject = null; $('scanInfo').textContent = '';
   $('btnTorch').classList.remove('on'); $('btnTorch').classList.add('hidden'); $('rw').classList.add('hidden');
   $('btnScan').textContent = '📷 Включить сканер'; $('btnScan').classList.remove('stop');
 }
@@ -302,9 +331,9 @@ async function onScan(text){
   lastCode = {code, at: now}; vib(80);
   if (st.mode === 'find'){ await stopScanner(); $('findInput').value = code; switchTab('find'); findItem(); return; }
   $('manual').value = code;
-  try { scanner.pause(true); } catch(e){}
+  paused = true;
   await addCode(code);
-  setTimeout(() => { if (scanner && st.scanning){ try { scanner.resume(); } catch(e){} } }, 900);
+  setTimeout(() => { paused = false; }, 900);
 }
 
 /* ---------- вкладки и настройки ---------- */
@@ -362,9 +391,9 @@ $('btnPodsRefresh').onclick = loadPods;
 $('btnPodBack').onclick = () => $('podDetail').classList.add('hidden');
 $('podsList').onclick = e => { const li = e.target.closest('li[data-s]'); if (li) openPod(li.dataset.s); };
 $('btnTorch').onclick = async () => {
-  if (!scanner) return;
+  if (!stream) return;
   torchOn = !torchOn;
-  try { await scanner.applyVideoConstraints({advanced:[{torch: torchOn}]}); $('btnTorch').classList.toggle('on', torchOn); }
+  try { await stream.getVideoTracks()[0].applyConstraints({advanced:[{torch: torchOn}]}); $('btnTorch').classList.toggle('on', torchOn); }
   catch(e){ torchOn = false; $('btnTorch').classList.remove('on'); toast('Вспышка недоступна', 'err'); }
 };
 document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => switchTab(b.dataset.tab));
