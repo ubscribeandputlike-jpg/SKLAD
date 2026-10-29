@@ -94,7 +94,8 @@ input:focus{border-color:#93c5fd;background:#fff}
 <main id="tab-find" class="hidden">
   <section class="card">
     <div class="cap" style="margin-bottom:8px">Где лежит товар?</div>
-    <div class="row"><input id="findInput" inputmode="numeric" autocomplete="off" placeholder="Штрихкод товара"><button class="btn primary" id="btnFind">Найти</button><button class="btn" id="btnFindScan">📷</button></div>
+    <div class="row"><input id="findInput" inputmode="numeric" autocomplete="off" placeholder="Штрихкод или последние цифры"><button class="btn primary" id="btnFind">Найти</button><button class="btn" id="btnFindScan">📷</button></div>
+    <div class="hint">Можно ввести только последние 3–4 цифры — покажу все подходящие штрихкоды.</div>
     <div id="findResult"></div><div id="findList"></div>
   </section>
 </main>
@@ -230,17 +231,30 @@ async function findItem(){
   if (!code){ toast('Введи или отсканируй штрихкод', 'err'); return; }
   $('findResult').innerHTML = '<div class="hint">Ищу…</div>'; $('findList').innerHTML = '';
   const online = await pull();
-  const rows = st.db.filter(r => r.barcode === code).sort(byNew);
   const note = online ? '' : '<div class="hint">Нет связи с таблицей — показаны данные с этого телефона</div>';
+  // сначала точное совпадение, иначе — по последним цифрам
+  let rows = st.db.filter(r => r.barcode === code), tail = false;
+  if (!rows.length && code.length >= 3){ rows = st.db.filter(r => r.barcode.endsWith(code)); tail = true; }
   if (!rows.length){
-    $('findResult').innerHTML = '<div class="hero bad"><div class="lb">не найдено</div><div class="nm" style="font-size:19px">' + esc(code) + '</div><div class="s2">Такого штрихкода нет в базе</div></div>' + note;
+    $('findResult').innerHTML = '<div class="hero bad"><div class="lb">не найдено</div><div class="nm" style="font-size:19px">' + esc(code) + '</div><div class="s2">' +
+      (code.length < 3 ? 'Для поиска по концу кода введи минимум 3 цифры' : 'Такого штрихкода нет в базе') + '</div></div>' + note;
     return;
   }
-  const top = rows[0], others = rows.slice(1);
-  $('findResult').innerHTML = '<div class="hero"><div class="lb">товар лежит в</div><div class="nm">' + esc(top.section) + '</div><div class="s2">' + fmt(top.ts) + '</div>' +
-    (others.length ? '<div class="s2" style="color:#b45309">Ещё записи: ' + others.length + '</div>' : '') + '</div>' + note;
-  $('findList').innerHTML = others.length ? '<ul class="list">' + others.map(r =>
-    '<li><span class="code">' + esc(r.barcode) + '</span><span class="sec">' + esc(r.section) + '</span><span class="meta">' + fmt(r.ts) + '</span></li>').join('') + '</ul>' : '';
+  const groups = new Map();
+  rows.sort(byNew).forEach(r => { if (!groups.has(r.barcode)) groups.set(r.barcode, []); groups.get(r.barcode).push(r); });
+  const hl = bc => tail ? esc(bc.slice(0, bc.length - code.length)) + '<b>' + esc(code) + '</b>' : esc(bc);
+  if (groups.size === 1){
+    const [bc, list] = [...groups][0], top = list[0], others = list.slice(1);
+    $('findResult').innerHTML = '<div class="hero"><div class="lb">товар лежит в</div><div class="nm">' + esc(top.section) + '</div>' +
+      '<div class="s2">штрихкод ' + hl(bc) + '</div><div class="s2">' + fmt(top.ts) + '</div>' +
+      (others.length ? '<div class="s2" style="color:#b45309">Ещё записи: ' + others.length + '</div>' : '') + '</div>' + note;
+    $('findList').innerHTML = others.length ? '<ul class="list">' + others.map(r =>
+      '<li><span class="code">' + esc(r.barcode) + '</span><span class="sec">' + esc(r.section) + '</span><span class="meta">' + fmt(r.ts) + '</span></li>').join('') + '</ul>' : '';
+  } else {
+    $('findResult').innerHTML = '<div class="hero"><div class="lb">найдено разных штрихкодов</div><div class="nm">' + groups.size + '</div><div class="s2">оканчиваются на «' + esc(code) + '»</div></div>' + note;
+    $('findList').innerHTML = '<ul class="list">' + [...groups].map(([bc, list]) =>
+      '<li><span class="code">' + hl(bc) + '</span><span class="sec">' + esc(list[0].section) + '</span><span class="meta">' + fmt(list[0].ts) + (list.length > 1 ? ' · записей: ' + list.length : '') + '</span></li>').join('') + '</ul>';
+  }
   vib(40);
 }
 
