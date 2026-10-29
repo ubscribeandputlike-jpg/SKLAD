@@ -79,7 +79,7 @@ input:focus{border-color:#93c5fd;background:#fff}
     <div class="pod"><div class="i"><div class="l">Текущий поддон</div><div class="n" id="podName">не выбран</div><div class="c" id="podCount">—</div></div><button id="btnChangePod">Сменить</button></div>
     <div class="row" style="margin-bottom:12px">
       <div style="min-width:0"><div class="cap">Последний штрихкод</div><div class="big" id="lastScan">—</div></div>
-      <div style="text-align:right"><span class="badge" id="shiftPill">Смена —</span><div style="margin-top:6px"><span class="badge" id="netBadge">—</span></div></div>
+      <div style="text-align:right"><span class="badge" id="netBadge">—</span></div>
     </div>
     <div class="rw hidden" id="rw"><div id="reader"></div><button class="torch hidden" id="btnTorch">🔦</button></div>
     <button class="btn primary block scan" id="btnScan">📷 Включить сканер</button>
@@ -112,17 +112,22 @@ input:focus{border-color:#93c5fd;background:#fff}
 
 <div class="toast" id="toast"></div>
 
-<div class="modal" id="modal"><div class="sheet">
-  <h2 id="modalTitle">Настройки</h2>
-  <div class="field"><label>Кто сканирует</label><div class="seg" id="shiftSeg"><button data-w="Смена 1">Смена 1</button><button data-w="Смена 2">Смена 2</button></div></div>
-  <div class="field"><label for="inpSection">Поддон</label><input id="inpSection" placeholder="Например: А-12" autocomplete="off"></div>
+<div class="modal" id="modalPod"><div class="sheet">
+  <h2 id="podModalTitle">Какой поддон?</h2>
+  <div class="field"><label for="inpSection">Номер поддона</label><input id="inpSection" placeholder="Например: А-12" autocomplete="off"></div>
+  <button class="btn primary block" id="btnPodSave">Готово</button>
+  <button class="btn block" id="btnPodClose" style="margin-top:9px;background:transparent;border:0;color:var(--dim)">Закрыть</button>
+</div></div>
+
+<div class="modal" id="modalApi"><div class="sheet">
+  <h2>Настройки базы</h2>
   <div class="field"><label for="inpApi">URL Google Apps Script (необязательно)</label>
     <input id="inpApi" placeholder="https://script.google.com/macros/s/.../exec" inputmode="url" autocapitalize="off" spellcheck="false">
     <div class="hint">Пусто — база хранится только на этом телефоне. С URL записи уходят в Google Таблицу и видны на всех устройствах.</div></div>
   <button class="btn block" id="btnTest" style="margin-bottom:10px">🔌 Проверить связь</button>
   <div class="hint" id="apiStatus" style="margin:-4px 0 12px"></div>
-  <button class="btn primary block" id="btnSave">Сохранить</button>
-  <button class="btn block" id="btnClose" style="margin-top:9px;background:transparent;border:0;color:var(--dim)">Закрыть</button>
+  <button class="btn primary block" id="btnApiSave">Сохранить</button>
+  <button class="btn block" id="btnApiClose" style="margin-top:9px;background:transparent;border:0;color:var(--dim)">Закрыть</button>
 </div></div>
 
 <nav class="tabs">
@@ -133,18 +138,18 @@ input:focus{border-color:#93c5fd;background:#fff}
 
 <script>
 const $ = id => document.getElementById(id);
-const K = {db:'wh_db', w:'wh_w', s:'wh_s', api:'wh_api'};
+const K = {db:'wh_db', s:'wh_s', api:'wh_api'};
 function load(k, d){ try { const v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch(e){ return d; } }
 const st = {
-  w: localStorage.getItem(K.w) || '', s: localStorage.getItem(K.s) || '', api: localStorage.getItem(K.api) || '',
+  s: localStorage.getItem(K.s) || '', api: localStorage.getItem(K.api) || '',
   db: load(K.db, []), scanning: false, mode: 'add', busy: false
 };
-let scanner = null, torchOn = false, lastCode = {code:'', at:0}, pendingW = '';
+let scanner = null, torchOn = false, lastCode = {code:'', at:0};
 
 function save(){
   try {
     localStorage.setItem(K.db, JSON.stringify(st.db));
-    localStorage.setItem(K.w, st.w); localStorage.setItem(K.s, st.s); localStorage.setItem(K.api, st.api);
+    localStorage.setItem(K.s, st.s); localStorage.setItem(K.api, st.api);
   } catch(e){ toast('Память телефона заполнена', 'err'); }
 }
 function toast(msg, type, ms){
@@ -191,11 +196,10 @@ async function pull(){
 async function addCode(raw){
   const barcode = norm(raw);
   if (!barcode){ toast('Введите или отсканируйте штрихкод', 'err'); return false; }
-  if (!st.s){ toast('Сначала выбери поддон', 'err'); openModal('Какой поддон?'); return false; }
-  if (!st.w){ toast('Сначала выбери смену', 'err'); openModal('Кто сканирует?'); return false; }
+  if (!st.s){ toast('Сначала выбери поддон', 'err'); openPodModal('Какой поддон?'); return false; }
   const dup = st.db.some(r => r.barcode === barcode && r.section === st.s);
   const rec = {id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7), ts: new Date().toISOString(),
-    section: st.s, barcode, worker: st.w, sync: !st.api};
+    section: st.s, barcode, worker: '', sync: !st.api};
   st.db.unshift(rec); save();
   $('lastScan').textContent = barcode; $('manual').value = '';
   vib(60);
@@ -208,8 +212,6 @@ async function addCode(raw){
 function ui(){
   $('podLabel').textContent = st.s || 'Поддон не выбран';
   $('podName').textContent = st.s || 'не выбран';
-  $('shiftPill').textContent = st.w || 'Смена —';
-  $('shiftPill').className = 'badge' + (st.w ? '' : ' warn');
   const inPod = st.db.filter(r => r.section === st.s).length;
   const today = st.db.filter(r => r.section === st.s && new Date(r.ts).toDateString() === new Date().toDateString()).length;
   $('podCount').textContent = st.s ? (inPod ? 'записей: ' + inPod : 'пока пусто') : 'выбери поддон, чтобы сканировать';
@@ -232,10 +234,10 @@ async function findItem(){
     return;
   }
   const top = rows[0], others = rows.slice(1);
-  $('findResult').innerHTML = '<div class="hero"><div class="lb">товар лежит в</div><div class="nm">' + esc(top.section) + '</div><div class="s2">' + fmt(top.ts) + ' · ' + esc(top.worker || '—') + '</div>' +
+  $('findResult').innerHTML = '<div class="hero"><div class="lb">товар лежит в</div><div class="nm">' + esc(top.section) + '</div><div class="s2">' + fmt(top.ts) + '</div>' +
     (others.length ? '<div class="s2" style="color:#b45309">Ещё записи: ' + others.length + '</div>' : '') + '</div>' + note;
   $('findList').innerHTML = others.length ? '<ul class="list">' + others.map(r =>
-    '<li><span class="code">' + esc(r.barcode) + '</span><span class="sec">' + esc(r.section) + '</span><span class="meta">' + fmt(r.ts) + ' · ' + esc(r.worker || '—') + '</span></li>').join('') + '</ul>' : '';
+    '<li><span class="code">' + esc(r.barcode) + '</span><span class="sec">' + esc(r.section) + '</span><span class="meta">' + fmt(r.ts) + '</span></li>').join('') + '</ul>' : '';
   vib(40);
 }
 
@@ -255,7 +257,7 @@ async function loadPods(){
 function openPod(section){
   $('podDetail').classList.remove('hidden'); $('podDetailName').textContent = section;
   const rows = st.db.filter(r => r.section === section).sort(byNew);
-  $('podItems').innerHTML = rows.map(r => '<li><span class="code">' + esc(r.barcode) + '</span><span class="sec">' + esc(r.worker || '—') + '</span><span class="meta">' + fmt(r.ts) + '</span></li>').join('');
+  $('podItems').innerHTML = rows.map(r => '<li><span class="code">' + esc(r.barcode) + '</span><span class="meta">' + fmt(r.ts) + '</span></li>').join('');
   $('podDetail').scrollIntoView({behavior:'smooth'});
   $('btnUsePod').onclick = () => { st.s = section; save(); ui(); switchTab('scan'); toast('Поддон: ' + section, 'ok'); };
 }
@@ -266,16 +268,20 @@ async function startScanner(mode){
   st.mode = mode || 'add';
   if (!window.isSecureContext){ toast('Камера работает только по HTTPS', 'err', 4000); return; }
   if (typeof Html5Qrcode === 'undefined'){ toast('Библиотека сканера не загрузилась (нет интернета?)', 'err', 3500); return; }
-  if (st.mode === 'add' && !st.s){ openModal('Какой поддон?'); return; }
+  if (st.mode === 'add' && !st.s){ openPodModal('Какой поддон?'); return; }
   switchTab('scan');
   $('rw').classList.remove('hidden'); $('btnTorch').classList.remove('hidden');
   const F = window.Html5QrcodeSupportedFormats || {};
   const formats = [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39, F.CODE_93, F.ITF, F.CODABAR, F.QR_CODE, F.DATA_MATRIX].filter(v => v !== undefined);
   scanner = new Html5Qrcode('reader', {verbose:false, formatsToSupport: formats.length ? formats : undefined, experimentalFeatures:{useBarCodeDetectorIfSupported:true}});
   try {
-    await scanner.start({facingMode:'environment'},
-      {fps:15, qrbox:(w, h) => ({width:Math.floor(w * 0.92), height:Math.floor(h * 0.55)}), aspectRatio:1.4, disableFlip:true},
-      onScan, () => {});
+    const base = {fps:20, qrbox:(w, h) => ({width:Math.floor(w * 0.9), height:Math.floor(Math.min(h, w * 0.5))}), disableFlip:true};
+    try {
+      await scanner.start({facingMode:'environment'},
+        Object.assign({}, base, {videoConstraints:{facingMode:'environment', width:{ideal:1920}, height:{ideal:1080}}}), onScan, () => {});
+    } catch(e1){
+      await scanner.start({facingMode:'environment'}, base, onScan, () => {});
+    }
     st.scanning = true;
     $('btnScan').textContent = '⏹ Остановить сканер'; $('btnScan').classList.add('stop');
   } catch(e){
@@ -309,23 +315,31 @@ function switchTab(name){
   if (name === 'find') setTimeout(() => $('findInput').focus(), 80);
   window.scrollTo(0, 0);
 }
-function paintSeg(){ document.querySelectorAll('#shiftSeg button').forEach(b => b.classList.toggle('active', b.dataset.w === pendingW)); }
-function openModal(title){
-  pendingW = st.w || 'Смена 1'; $('modalTitle').textContent = title || 'Настройки';
-  $('inpSection').value = st.s; $('inpApi').value = st.api; $('apiStatus').textContent = '';
-  paintSeg(); $('modal').classList.add('open');
+function openPodModal(title){
+  $('podModalTitle').textContent = title || 'Какой поддон?'; $('inpSection').value = st.s;
+  $('modalPod').classList.add('open'); setTimeout(() => $('inpSection').focus(), 120);
 }
-function closeModal(){ $('modal').classList.remove('open'); }
+function closePodModal(){ $('modalPod').classList.remove('open'); }
+function openApiModal(){ $('inpApi').value = st.api; $('apiStatus').textContent = ''; $('modalApi').classList.add('open'); }
+function closeApiModal(){ $('modalApi').classList.remove('open'); }
 
-$('btnSettings').onclick = () => openModal('Настройки');
-$('btnChangePod').onclick = () => openModal('Сменить поддон');
-$('btnClose').onclick = closeModal;
-$('modal').onclick = e => { if (e.target === $('modal')) closeModal(); };
-$('shiftSeg').onclick = e => { const b = e.target.closest('button[data-w]'); if (b){ pendingW = b.dataset.w; paintSeg(); } };
-$('btnSave').onclick = () => {
-  st.w = pendingW; st.s = $('inpSection').value.trim(); st.api = $('inpApi').value.trim();
+$('btnSettings').onclick = openApiModal;
+$('btnChangePod').onclick = () => openPodModal('Сменить поддон');
+$('btnPodClose').onclick = closePodModal;
+$('btnApiClose').onclick = closeApiModal;
+$('modalPod').onclick = e => { if (e.target === $('modalPod')) closePodModal(); };
+$('modalApi').onclick = e => { if (e.target === $('modalApi')) closeApiModal(); };
+function savePod(){
+  const s = $('inpSection').value.trim();
+  if (!s){ toast('Введи номер поддона', 'err'); return; }
+  st.s = s; save(); ui(); closePodModal(); toast('Поддон: ' + s, 'ok');
+}
+$('btnPodSave').onclick = savePod;
+$('inpSection').onkeydown = e => { if (e.key === 'Enter'){ e.preventDefault(); savePod(); } };
+$('btnApiSave').onclick = () => {
+  st.api = $('inpApi').value.trim();
   if (st.api) st.db.forEach(r => { if (r.sync === undefined) r.sync = false; });
-  save(); ui(); closeModal(); toast('Сохранено', 'ok');
+  save(); ui(); closeApiModal(); toast('Сохранено', 'ok');
   if (st.api){ pull().then(() => { ui(); sync(); }); }
 };
 $('btnTest').onclick = async () => {
@@ -359,7 +373,7 @@ window.addEventListener('offline', ui);
 document.addEventListener('visibilitychange', () => { if (document.hidden && st.scanning) stopScanner(); });
 
 ui();
-if (!st.w || !st.s) openModal('Добро пожаловать! Укажи смену и поддон');
+if (!st.s) openPodModal('Добро пожаловать! Укажи поддон');
 if (st.api) pull().then(() => { ui(); sync(); });
 </script>
 </body>
