@@ -42,6 +42,8 @@ input:focus{border-color:#93c5fd;background:#fff}
 .frame{position:absolute;left:4%;right:4%;top:25%;bottom:25%;border:2px solid #22c55e;border-radius:12px;pointer-events:none;box-shadow:0 0 0 999px rgba(0,0,0,.28)}
 .torch{position:absolute;right:10px;bottom:10px;width:48px;height:48px;border-radius:14px;border:0;background:rgba(255,255,255,.2);color:#fff;font-size:22px;z-index:5}
 .torch.on{background:#fbbf24}
+textarea{width:100%;min-height:150px;border:1px solid var(--line);background:#f8fafc;border-radius:14px;padding:14px 15px;font-size:16px;font-family:inherit;color:var(--txt);outline:none;resize:vertical}
+textarea:focus{border-color:#93c5fd;background:#fff}
 .btn.danger{background:#fef2f2;color:#b91c1c;border-color:#fecaca}
 .hidden{display:none!important}
 .hint{font-size:12px;color:var(--dim);line-height:1.45;margin-top:6px}
@@ -101,6 +103,16 @@ input:focus{border-color:#93c5fd;background:#fff}
   </section>
 </main>
 
+<main id="tab-order" class="hidden">
+  <section class="card">
+    <div class="cap" style="margin-bottom:8px">Заявка</div>
+    <textarea id="orderInput" placeholder="Вставь сюда все штрихкоды или их последние цифры — через пробел, запятую или с новой строки"></textarea>
+    <div class="row" style="margin-top:10px"><button class="btn primary" id="btnOrder" style="flex:1">Найти всё</button><button class="btn" id="btnOrderClear">Очистить</button></div>
+    <div class="hint">Покажу, на каком поддоне лежит каждая позиция, сгруппирую по поддонам и отдельно выделю то, чего нет в базе.</div>
+    <div id="orderResult"></div>
+  </section>
+</main>
+
 <main id="tab-pods" class="hidden">
   <section class="card" id="podsCard">
     <div class="row"><div><div class="cap">Поддоны на складе</div><div class="hint" id="podsSub" style="margin:2px 0 0"></div></div><button class="btn ghost" id="btnPodsRefresh">Обновить</button></div>
@@ -148,6 +160,7 @@ input:focus{border-color:#93c5fd;background:#fff}
 <nav class="tabs">
   <button data-tab="scan" class="active"><span class="ic">📷</span>Скан</button>
   <button data-tab="find"><span class="ic">🔎</span>Поиск</button>
+  <button data-tab="order"><span class="ic">📋</span>Заявка</button>
   <button data-tab="pods"><span class="ic">🧱</span>Поддоны</button>
 </nav>
 
@@ -276,7 +289,40 @@ async function findItem(){
   vib(40);
 }
 
-let curPod = '', editId = null;
+let curPod = '', editId = null, orderText = '';
+async function runOrder(){
+  const toks = [...new Set($('orderInput').value.split(/[\s,;]+/).map(norm).filter(Boolean))];
+  if (!toks.length){ toast('Вставь список штрихкодов', 'err'); return; }
+  $('orderResult').innerHTML = '<div class="hint">Ищу…</div>';
+  const online = await pull();
+  const info = new Map();   // штрихкод -> Map(поддон -> сколько записей), первым идёт самый свежий поддон
+  st.db.slice().sort(byNew).forEach(r => { let o = info.get(r.barcode); if (!o){ o = new Map(); info.set(r.barcode, o); } o.set(r.section, (o.get(r.section) || 0) + 1); });
+  const all = [...info.keys()], groups = new Map(), none = [], multi = [];
+  for (const tk of toks){
+    let codes = all.filter(c => c === tk);
+    if (!codes.length && tk.length >= 3) codes = all.filter(c => c.endsWith(tk));
+    if (!codes.length){ none.push(tk); continue; }
+    if (codes.length > 1){ multi.push({tk, codes}); continue; }
+    const pods = [...info.get(codes[0]).keys()];
+    if (!groups.has(pods[0])) groups.set(pods[0], []);
+    groups.get(pods[0]).push({c: codes[0], also: pods.slice(1)});
+  }
+  const gl = [...groups].sort((a, b) => a[0].localeCompare(b[0], 'ru', {numeric:true}));
+  const found = gl.reduce((n, g) => n + g[1].length, 0);
+  let h = '<div class="stats"><span class="stat">Найдено: <b>' + found + '</b> из ' + toks.length + '</span><span class="stat">Поддонов: <b>' + gl.length + '</b></span>' +
+    (none.length ? '<span class="stat">Нет в базе: <b>' + none.length + '</b></span>' : '') + (multi.length ? '<span class="stat">Неоднозначно: <b>' + multi.length + '</b></span>' : '') + '</div>';
+  if (gl.length) h += '<ul class="list">' + gl.map(([s, a]) => '<li><span class="code">🧱 ' + esc(s) + '</span><span class="sec">' + a.length + '</span><span class="meta">' +
+    a.map(x => esc(x.c) + (x.also.length ? ' (ещё: ' + esc(x.also.join(', ')) + ')' : '')).join(' · ') + '</span></li>').join('') + '</ul>';
+  if (multi.length) h += '<div class="cap" style="margin-top:14px">Несколько вариантов</div><ul class="list">' + multi.map(m => '<li><span class="code">' + esc(m.tk) + '</span><span class="sec">' + m.codes.length +
+    '</span><span class="meta">' + m.codes.map(c => esc(c) + ' → ' + esc([...info.get(c).keys()][0])).join(' · ') + '</span></li>').join('') + '</ul>';
+  if (none.length) h += '<div class="hero bad" style="text-align:left"><div class="lb">нет в базе</div><div class="s2" style="font-size:14px;word-break:break-word">' + none.map(esc).join(', ') + '</div></div>';
+  if (!online) h += '<div class="hint">Нет связи с таблицей — показаны данные с этого телефона</div>';
+  h += '<button class="btn block" id="btnOrderCopy" style="margin-top:12px">📋 Скопировать результат</button>';
+  $('orderResult').innerHTML = h;
+  orderText = gl.map(([s, a]) => s + ': ' + a.map(x => x.c).join(', ')).join('\n') +
+    (multi.length ? '\nНеоднозначно: ' + multi.map(m => m.tk).join(', ') : '') + (none.length ? '\nНет в базе: ' + none.join(', ') : '');
+  vib(40);
+}
 function renderPods(online){
   const m = new Map();
   st.db.forEach(r => { if (!r.section) return; const c = m.get(r.section) || {section:r.section, n:0, last:r.ts}; c.n++; if (new Date(r.ts) > new Date(c.last)) c.last = r.ts; m.set(r.section, c); });
@@ -397,8 +443,9 @@ async function onScan(text){
 /* ---------- вкладки и настройки ---------- */
 function switchTab(name){
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
-  ['scan', 'find', 'pods'].forEach(t => $('tab-' + t).classList.toggle('hidden', t !== name));
+  ['scan', 'find', 'order', 'pods'].forEach(t => $('tab-' + t).classList.toggle('hidden', t !== name));
   if (name === 'pods') loadPods();
+  if (name === 'order') setTimeout(() => $('orderInput').focus(), 80);
   if (name === 'find') setTimeout(() => $('findInput').focus(), 80);
   window.scrollTo(0, 0);
 }
@@ -451,6 +498,12 @@ $('btnEdSave').onclick = saveEdit;
 $('btnEdDel').onclick = delEdit;
 $('btnEdClose').onclick = closeEdit;
 $('modalEdit').onclick = e => { if (e.target === $('modalEdit')) closeEdit(); };
+$('btnOrder').onclick = runOrder;
+$('btnOrderClear').onclick = () => { $('orderInput').value = ''; $('orderResult').innerHTML = ''; orderText = ''; $('orderInput').focus(); };
+$('orderResult').onclick = e => {
+  if (e.target.id !== 'btnOrderCopy') return;
+  (navigator.clipboard ? navigator.clipboard.writeText(orderText) : Promise.reject()).then(() => toast('Скопировано', 'ok')).catch(() => toast('Не удалось скопировать', 'err'));
+};
 $('btnPodBack').onclick = () => $('podDetail').classList.add('hidden');
 $('podsList').onclick = e => { const li = e.target.closest('li[data-s]'); if (li) openPod(li.dataset.s); };
 $('btnTorch').onclick = async () => {
