@@ -121,7 +121,7 @@ textarea:focus{border-color:#93c5fd;background:#fff}
   </section>
   <section class="card hidden" id="podDetail">
     <button class="btn ghost" id="btnPodBack">← Назад к поддонам</button>
-    <div class="row" style="margin-top:8px"><div><div class="cap">Содержимое</div><div style="font-size:17px;font-weight:700" id="podDetailName"></div></div><button class="btn ghost" id="btnUsePod">Сканировать сюда</button></div>
+    <div class="row" style="margin-top:8px"><div><div class="cap">Содержимое</div><div style="font-size:17px;font-weight:700" id="podDetailName"></div></div><div style="display:flex;flex-direction:column;align-items:flex-end"><button class="btn ghost" id="btnUsePod">Сканировать сюда</button><button class="btn ghost" id="btnRenamePod">✏️ Переименовать</button></div></div>
     <div class="hint">Нажми на запись, чтобы изменить или удалить.</div>
     <ul class="list click" id="podItems"></ul>
   </section>
@@ -145,6 +145,14 @@ textarea:focus{border-color:#93c5fd;background:#fff}
   <div class="hint" id="apiStatus" style="margin:-4px 0 12px"></div>
   <button class="btn primary block" id="btnApiSave">Сохранить</button>
   <button class="btn block" id="btnApiClose" style="margin-top:9px;background:transparent;border:0;color:var(--dim)">Закрыть</button>
+</div></div>
+
+<div class="modal" id="modalRename"><div class="sheet">
+  <h2>Переименовать поддон</h2>
+  <div class="field"><label for="rnName">Новое название</label><input id="rnName" autocomplete="off"></div>
+  <div class="hint" style="margin:-6px 0 14px">Название изменится у всех записей этого поддона. Если такой поддон уже есть, записи объединятся.</div>
+  <button class="btn primary block" id="btnRnSave">Переименовать</button>
+  <button class="btn block" id="btnRnClose" style="margin-top:9px;background:transparent;border:0;color:var(--dim)">Закрыть</button>
 </div></div>
 
 <div class="modal" id="modalEdit"><div class="sheet">
@@ -199,16 +207,21 @@ async function post(rec){
   return !!(d && d.ok && (!(rec.del || rec.edit) || d.v >= 2));
 }
 async function sync(){
-  if (!st.api || sync.busy) return;
+  if (!st.api) return;
+  if (sync.busy){ sync.again = true; return; }
   sync.busy = true;
+  let fail = false;
   try {
     for (const id of [...st.del]){
-      try { if (await post({id, del:true})) st.del = st.del.filter(x => x !== id); else break; } catch(e){ break; }
+      try { if (await post({id, del:true})) st.del = st.del.filter(x => x !== id); else { fail = true; break; } } catch(e){ fail = true; break; }
     }
-    for (const r of st.db.filter(r => !r.sync).reverse()){
-      try { if (await post(r)){ r.sync = true; delete r.edit; } else break; } catch(e){ break; }
+    if (!fail) for (const r of st.db.filter(r => !r.sync).reverse()){
+      try { if (await post(r)){ r.sync = true; delete r.edit; } else { fail = true; break; } } catch(e){ fail = true; break; }
     }
   } finally { sync.busy = false; save(); ui(); }
+  // добавили запись во время отправки или была ошибка сети — пробуем ещё раз
+  const pending = st.del.length > 0 || st.db.some(r => !r.sync);
+  if (sync.again || (pending && fail)){ clearTimeout(sync.t); sync.t = setTimeout(sync, sync.again ? 300 : 20000); sync.again = false; }
 }
 async function pull(){
   if (!st.api) return true;
@@ -221,9 +234,13 @@ async function pull(){
       if (pend.has(row.id)) continue;
       const loc = have.get(row.id);
       if (!loc) st.db.push({id:row.id, ts:row.ts, section:row.section, barcode:String(row.barcode), worker:row.worker, sync:true});
-      else if (loc.sync){ loc.section = row.section; loc.barcode = String(row.barcode); }
+      else if (loc.sync){
+        loc.section = row.section;
+        const sv = String(row.barcode);   // не затираем код с нулями в начале, если таблица их «съела»
+        if (sv !== loc.barcode && loc.barcode.replace(/^0+/, '') !== sv) loc.barcode = sv;
+      }
     }
-    if (!sync.busy && rows.length < 10000) st.db = st.db.filter(r => !r.sync || srv.has(r.id));
+    if (!sync.busy && rows.length && rows.length < 10000) st.db = st.db.filter(r => !r.sync || srv.has(r.id));
     st.db.sort(byNew); save(); return true;
   } catch(e){ return false; }
 }
@@ -354,6 +371,18 @@ function openEdit(id){
   $('modalEdit').classList.add('open');
 }
 function closeEdit(){ $('modalEdit').classList.remove('open'); editId = null; }
+function openRename(){ if (!curPod) return; $('rnName').value = curPod; $('modalRename').classList.add('open'); setTimeout(() => $('rnName').focus(), 120); }
+function closeRename(){ $('modalRename').classList.remove('open'); }
+function doRename(){
+  const nn = $('rnName').value.trim(), old = curPod;
+  if (!nn){ toast('Введи название поддона', 'err'); return; }
+  if (nn === old){ closeRename(); return; }
+  if (st.db.some(r => r.section === nn) && !confirm('Поддон «' + nn + '» уже есть. Объединить записи?')) return;
+  let n = 0;
+  st.db.forEach(r => { if (r.section === old){ r.section = nn; r.sync = false; r.edit = true; n++; } });
+  if (st.s === old) st.s = nn;
+  save(); closeRename(); curPod = nn; afterEdit(); toast('Поддон переименован (записей: ' + n + ')', 'ok');
+}
 function afterEdit(){ ui(); renderPods(navigator.onLine); openPod(curPod, true); sync(); }
 function saveEdit(){
   const r = st.db.find(x => x.id === editId); if (!r) return closeEdit();
@@ -494,6 +523,11 @@ $('findInput').onkeydown = e => { if (e.key === 'Enter'){ e.preventDefault(); fi
 $('btnFindScan').onclick = () => startScanner('find');
 $('btnPodsRefresh').onclick = loadPods;
 $('podItems').onclick = e => { const li = e.target.closest('li[data-id]'); if (li) openEdit(li.dataset.id); };
+$('btnRenamePod').onclick = openRename;
+$('btnRnSave').onclick = doRename;
+$('btnRnClose').onclick = closeRename;
+$('rnName').onkeydown = e => { if (e.key === 'Enter'){ e.preventDefault(); doRename(); } };
+$('modalRename').onclick = e => { if (e.target === $('modalRename')) closeRename(); };
 $('btnEdSave').onclick = saveEdit;
 $('btnEdDel').onclick = delEdit;
 $('btnEdClose').onclick = closeEdit;
